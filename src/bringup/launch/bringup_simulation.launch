@@ -28,7 +28,7 @@
 
   <remap from="/wamv/sensors/lidars/lidar_wamv/points" to="/hesai/pandar"/>
    <remap from="/wamv1/sensors/lidars/lidar_wamv/points" to="/hesai/pandar1"/>
-    <remap from="/wamv2/sensors/lidars/lidar_wamv/points" to="/hesai/pandar1"/>
+    <remap from="/wamv2/sensors/lidars/lidar_wamv/points" to="/hesai/pandar2"/>
      <remap from="/wamv3/sensors/lidars/lidar_wamv/points" to="/hesai/pandar3"/>
       <remap from="/wamv4/sensors/lidars/lidar_wamv/points" to="/hesai/pandar4"/>
        <remap from="/wamv5/sensors/lidars/lidar_wamv/points" to="/hesai/pandar5"/>
