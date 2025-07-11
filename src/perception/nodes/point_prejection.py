@@ -39,6 +39,15 @@ class MapProjection:
         except rospy.ServiceException as e:
             rospy.logerr("Failed to get map: %s" % e)
 
+        # ============== 地图衰减参数 ============
+        self.decay_map = np.zeros_like(self.obs_map.data, dtype=np.float32)
+        self.decay_map[self.map_data.data == 100] = 2.0
+        self.decay_rate = 0.2  # 衰减速度
+        self.detection_value = 1.0  # 增量速度
+        self.obstacle_threshold = 0.3 # 障碍物判定阈值
+        # self.static_mask = (self.map_data.data == 100) # 静态障碍物掩码
+        self.static_mask = (self.obs_map.data == 100) # 静态障碍物掩码
+
         # ============== 发布话题 =====================
         self.obs_map_pub = rospy.Publisher("/obs_map", OccupancyGrid, queue_size=1)
         self.filtered_points_pub = rospy.Publisher("/filtered_points", PointCloud2, queue_size=1)
@@ -68,15 +77,21 @@ class MapProjection:
 
     def reset_map_callback(self, req):
         """
-        回调: 直接从 map_server 获取最新地图，覆盖当前地图，实现“回滚”。
+        回调: 直接从 map_server 获取最新地图，覆盖当前地图，实现“回滚”，同时重置衰减地图。
         """
         try:
             latest_map = self.map_client().map
-            self.obs_map.data  = np.array(latest_map.data, dtype=np.int8)
+            self.obs_map.data = np.array(latest_map.data, dtype=np.int8)
             self.obs_map.header = latest_map.header
-            self.obs_map.info   = latest_map.info
+            self.obs_map.info = latest_map.info
 
-            rospy.loginfo("Map has been reset to the latest map from map_server.")
+            self.static_mask = (self.obs_map.data == 100)
+            
+            # 重置衰减地图
+            self.decay_map = np.zeros_like(self.obs_map.data, dtype=np.float32)
+            self.decay_map[self.obs_map.data == 100] = 2.0
+            
+            rospy.loginfo("Map and decay map have been reset.")
         except rospy.ServiceException as e:
             rospy.logerr("Failed to get map during reset: %s" % e)
 
@@ -86,6 +101,11 @@ class MapProjection:
         """
         这个回调函数会传入时间上对齐（近似或严格）的点云和里程计消息
         """
+        self.decay_map[self.static_mask] = 2.0
+        non_static = ~self.static_mask
+        self.decay_map[non_static] = np.maximum(
+            self.decay_map[non_static] - self.decay_rate, 0.0)
+
         # =========== 1) 点云裁剪，排除车身等 ===========
         cropped_points = []
         for p in read_points(pc_msg, field_names=("x", "y", "z"), skip_nans=True):
@@ -136,15 +156,21 @@ class MapProjection:
         map_org_x = self.obs_map.info.origin.position.x
         map_org_y = self.obs_map.info.origin.position.y
 
-        # 取出当前地图为 numpy array
-        map_data_np = self.obs_map.data  # 已经是 np.array 类型
-
-        # 遍历所有点, 将其对应的栅格(及膨胀区)设置为占据
+        # 每次用点云投影到地图时，遍历所有点, 在衰减地图上添加增量
         for (x_o, y_o, z_o) in transformed_points:
             i_center = int((x_o - map_org_x) / self.map_res)
             j_center = int((y_o - map_org_y) / self.map_res)
             if 0 <= i_center < map_w and 0 <= j_center < map_h:
-                self.set_occupied_inflated(map_data_np, i_center, j_center, map_w, map_h)
+                self.set_decay_inflated(i_center, j_center, map_w, map_h)
+
+        # 显式识别动态障碍物
+        dynamic_obstacles = (self.decay_map > self.obstacle_threshold) & (~self.static_mask)
+        # 合并静态和动态障碍物
+        combined_obstacles = np.logical_or(self.static_mask, dynamic_obstacles)
+        # 创建最终地图
+        map_data_np = np.where(combined_obstacles, 
+                            100,  # 障碍物区域
+                            0)    # 非障碍物区域
 
         # 发布更新后的地图
         self.obs_map.data = map_data_np.tolist()
@@ -169,6 +195,23 @@ class MapProjection:
                     if 0 <= i_new < map_w and 0 <= j_new < map_h:
                         idx = i_new + j_new * map_w
                         map_data_np[idx] = 100
+    
+    def set_decay_inflated(self, i_center, j_center, map_w, map_h):
+        """
+        将(i_center, j_center)以及周围区域的衰减值增强
+        """
+        r = self.inflation_radius_cells
+        for di in range(-r, r+1):
+            for dj in range(-r, r+1):
+                dist = np.sqrt(di**2 + dj**2)
+                if dist <= r:
+                    i_new = i_center + di
+                    j_new = j_center + dj
+                    if 0 <= i_new < map_w and 0 <= j_new < map_h:
+                        idx = i_new + j_new * map_w
+                        decay_factor = 1.0 - (dist / r) if r > 0 else 1.0
+                        self.decay_map[idx] = max(self.decay_map[idx], 
+                                                self.detection_value * decay_factor)
 
 if __name__ == '__main__':
     try:
